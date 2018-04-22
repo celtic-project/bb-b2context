@@ -45,6 +45,13 @@
       1.8.00  14-Feb-18  Remove dependency on Blackboard context object
                          Use log file in plugins log directory
                          Fix bug with saving group settings
+      1.9.00  22-Apr-18  Removed hard-coded file separator characters
+                         Added log methods for error messages and objects
+                         Log messages written to System.err if unable to access plugin log file
+                         Added getSettings method for node only settings
+                         Fixed bug when deleting empty properties files
+                         Fixed bug with getSchema() when B2 running from cache directory
+                         Added code to migrate old group settings files
  */
 package com.spvsoftwareproducts.blackboard.utils;
 
@@ -86,6 +93,9 @@ import blackboard.persist.BbPersistenceManager;
 import blackboard.platform.filesystem.FileSystemException;
 import blackboard.platform.filesystem.manager.CourseFileManager;
 import blackboard.platform.filesystem.manager.CourseContentFileManager;
+import blackboard.platform.cx.component.CopyControl;
+import blackboard.platform.cx.component.ExportControl;
+import blackboard.platform.cx.component.ImportControl;
 
 import blackboard.persist.navigation.NavigationItemDbLoader;
 import blackboard.data.navigation.NavigationItem;
@@ -173,7 +183,7 @@ import blackboard.platform.log.LogServiceFactory;
  * Learn 9.1SP10 (or higher).
  *
  * @author      Stephen P Vickers
- * @version     1.8 (14-Feb-18)
+ * @version     1.9 (22-Apr-18)
  */
 public class B2Context {
 
@@ -183,14 +193,16 @@ public class B2Context {
   private static final int[] V91_RELEASE = {407, 452, 482};
   private static final String LOG_LEVEL_SETTING = "loglevel";
   private static final String LOG_LEVEL_DEBUG_SETTING = "debug";
+  private static final String GROUPS_SETTING = "groups";
 
 // Class variables
-  private static UserRegistryEntryDbLoader urLoader = null;
-  private static UserRegistryEntryDbPersister urPersister = null;
-  private static String className = null;
-  private static Boolean nodeSupport = null;
-  private static Log log = null;
-  private static boolean logDebug = false;
+  private static volatile UserRegistryEntryDbLoader urLoader = null;
+  private static volatile UserRegistryEntryDbPersister urPersister = null;
+  private static volatile String className = null;
+  private static volatile Boolean nodeSupport = null;
+  private static volatile Log log = null;
+  private static volatile boolean logDebug = false;
+  private static volatile String logPrefix = null;
   private Context context = null;
   private User user = null;
   private Course course = null;
@@ -245,14 +257,14 @@ public class B2Context {
    */
   public B2Context(HttpServletRequest request) {
 
-    Context context = null;
+    Context aContext = null;
     if (request != null) {
       this.request = request;
-      context = ContextManagerFactory.getInstance().setContext(request);
+      aContext = ContextManagerFactory.getInstance().setContext(request);
     }
-    this.context = context;
+    this.context = aContext;
 
-    init(context);
+    init(aContext);
 
   }
 
@@ -306,21 +318,21 @@ public class B2Context {
     }
 
     if (className == null) {
-      className = this.getClass().getName();
-      className = className.substring(className.lastIndexOf(".") + 1);
+      String name = this.getClass().getName();
+      className = name.substring(name.lastIndexOf(".") + 1);
     }
     String location = this.getClass().getClassLoader().getResource(this.getClass().getName().replace('.', '/') + ".class").toString();
     int pos = location.indexOf("/plugins/");
     if (pos >= 0) {
-      this.schema = location.substring(0, pos);
       location = location.substring(pos + 9);
       location = location.substring(0, location.indexOf('/'));
       String[] plugInElements = location.split("-", 2);
       this.vendorId = plugInElements[0];
       this.handle = plugInElements[1];
       this.path = PlugInUtil.getUri(this.vendorId, this.handle, "");
-      pos = this.schema.lastIndexOf('/');
-      this.schema = this.schema.substring(pos + 1);
+      pos = this.path.indexOf(location);
+      this.schema = this.path.substring(pos + location.length() + 1);
+      this.schema = this.schema.substring(0, this.schema.indexOf('/'));
       PlugInConfig config;
       try {
         config = new PlugInConfig(this.vendorId, this.handle);
@@ -394,7 +406,7 @@ public class B2Context {
    *
    * @return         <code>true</code> if node support is enabled
    */
-  public static boolean getNodeSupport() {
+  public synchronized static boolean getNodeSupport() {
 
     if (nodeSupport == null) {
       nodeSupport = getIsVersion(9, 1, 8);
@@ -582,7 +594,7 @@ public class B2Context {
         UserDbLoader userLoader = UserDbLoader.Default.getInstance();
         this.user = userLoader.loadById(this.userId);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.getUser:", (Object)e);
       }
     }
 
@@ -607,7 +619,7 @@ public class B2Context {
     } else {
       changed = false;
     }
-    if (changed && this.ignoreContentContext && this.groupId.equals(Id.UNSET_ID) && !this.ignoreCourseContext) {
+    if (changed && (this.ignoreContentContext || !this.hasContentContext()) && (this.ignoreGroupContext || !this.hasGroupContext())) {
       this.settings[0][0] = null;
       this.settings[0][1] = null;
     }
@@ -627,7 +639,7 @@ public class B2Context {
         CourseDbLoader courseLoader = CourseDbLoader.Default.getInstance();
         this.course = courseLoader.loadById(this.courseId);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.getCourse:", (Object)e);
       }
     }
 
@@ -649,10 +661,11 @@ public class B2Context {
     } else if (!group.getId().equals(this.groupId)) {
       this.group = group;
       this.groupId = group.getId();
+      changed = true;
     } else {
       changed = false;
     }
-    if (changed && this.ignoreContentContext && !this.ignoreGroupContext) {
+    if (changed && (this.ignoreContentContext || !this.hasContentContext()) && !this.ignoreGroupContext) {
       this.settings[0][0] = null;
       this.settings[0][1] = null;
     }
@@ -671,7 +684,7 @@ public class B2Context {
         GroupDbLoader groupLoader = GroupDbLoader.Default.getInstance();
         this.group = groupLoader.loadById(this.groupId);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.getGroup:", (Object)e);
       }
     }
 
@@ -715,7 +728,7 @@ public class B2Context {
         ContentDbLoader contentLoader = ContentDbLoader.Default.getInstance();
         this.content = contentLoader.loadById(this.contentId);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.geContent:", (Object)e);
       }
     }
 
@@ -748,21 +761,23 @@ public class B2Context {
   /**
    * Sets the current user ID.
    *
-   * @param userId the user ID
+   * @param userIdString the user ID as a string
+   *
+   * @return  <code>true</code> if the user ID was set
    */
   public boolean setUserId(String userIdString) {
 
     boolean ok = true;
-    Id userId = Id.UNSET_ID;
+    Id aUserId = Id.UNSET_ID;
     if ((userIdString != null) && !userIdString.equals(this.userId.toExternalString())) {
       try {
-        userId = Id.generateId(User.DATA_TYPE, userIdString);
+        aUserId = Id.generateId(User.DATA_TYPE, userIdString);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.setUserId:", (Object)e);
         ok = false;
       }
     }
-    setUserId(userId);
+    setUserId(aUserId);
 
     return ok;
 
@@ -821,7 +836,7 @@ public class B2Context {
       this.courseId = courseId;
       this.course = null;
     }
-    if (changed && this.ignoreContentContext && this.groupId.equals(Id.UNSET_ID) && !this.ignoreCourseContext) {
+    if (changed && (this.ignoreContentContext || !this.hasContentContext()) && (this.ignoreGroupContext || !this.hasGroupContext())) {
       this.settings[0][0] = null;
       this.settings[0][1] = null;
     }
@@ -832,21 +847,23 @@ public class B2Context {
   /**
    * Sets the current course ID.
    *
-   * @param courseId the course ID
+   * @param courseIdString the course ID as a string
+   *
+   * @return  <code>true</code> if the course ID was set
    */
   public boolean setCourseId(String courseIdString) {
 
     boolean ok = true;
-    Id courseId = Id.UNSET_ID;
+    Id aCourseId = Id.UNSET_ID;
     if ((courseIdString != null) && !courseIdString.equals(this.courseId.toExternalString())) {
       try {
-        courseId = Id.generateId(Course.DATA_TYPE, courseIdString);
+        aCourseId = Id.generateId(Course.DATA_TYPE, courseIdString);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.setCourseId:", (Object)e);
         ok = false;
       }
     }
-    setCourseId(courseId);
+    setCourseId(aCourseId);
 
     return ok;
 
@@ -905,7 +922,7 @@ public class B2Context {
       this.groupId = groupId;
       this.group = null;
     }
-    if (changed && this.ignoreContentContext && !this.ignoreGroupContext) {
+    if (changed && (this.ignoreContentContext || !this.hasContentContext()) && !this.ignoreGroupContext) {
       this.settings[0][0] = null;
       this.settings[0][1] = null;
     }
@@ -915,21 +932,23 @@ public class B2Context {
   /**
    * Sets the current group ID.
    *
-   * @param userId the group ID
+   * @param groupIdString the group ID as a string
+   *
+   * @return  <code>true</code> if the group ID was set
    */
   public boolean setGroupId(String groupIdString) {
 
     boolean ok = true;
-    Id groupId = Id.UNSET_ID;
+    Id aGroupId = Id.UNSET_ID;
     if ((groupIdString != null) && !groupIdString.equals(this.groupId.toExternalString())) {
       try {
-        groupId = Id.generateId(Group.DATA_TYPE, groupIdString);
+        aGroupId = Id.generateId(Group.DATA_TYPE, groupIdString);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.setGroupId:", (Object)e);
         ok = false;
       }
     }
-    setGroupId(groupId);
+    setGroupId(aGroupId);
 
     return ok;
 
@@ -998,21 +1017,23 @@ public class B2Context {
   /**
    * Sets the current content ID.
    *
-   * @param contentId the content ID
+   * @param contentIdString the content ID as a string
+   *
+   * @return  <code>true</code> if the content ID was set
    */
   public boolean setContentId(String contentIdString) {
 
     boolean ok = true;
-    Id contentId = Id.UNSET_ID;
+    Id aContentId = Id.UNSET_ID;
     if ((contentIdString != null) && !contentIdString.equals(this.contentId.toExternalString())) {
       try {
-        contentId = Id.generateId(Content.DATA_TYPE, contentIdString);
+        aContentId = Id.generateId(Content.DATA_TYPE, contentIdString);
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.setContentId:", (Object)e);
         ok = false;
       }
     }
-    setContentId(contentId);
+    setContentId(aContentId);
 
     return ok;
 
@@ -1199,6 +1220,8 @@ public class B2Context {
 
   /**
    * Gets the path for the current Building Block using a specified schema name.
+   *
+   * @param schema   name of schema to use in path
    *
    * @return         the URL path
    */
@@ -1507,12 +1530,12 @@ public class B2Context {
     if (getNodeSupport()) {
       if (!this.courseId.equals(Id.UNSET_ID)) {
         try {
-          Id nodeId = NodeManagerFactory.getAssociationManager().loadCoursePrimaryNodeId(this.courseId);
+          Id nodeId = NodeManagerFactory.getAssociationManager().loadPrimaryNodeId(this.courseId, ObjectType.Course); //.loadCoursePrimaryNodeId(this.courseId);
           if (nodeId != null) {
             this.node = NodeManagerFactory.getHierarchyManager().loadNodeById(nodeId);
           }
         } catch (PersistenceException e) {
-          log(true, e.toString());
+          log(true, "Error in B2Context.initNode:", (Object)e);
         }
       } else if ((this.module != null) && getIsVersion(9, 1, 10)) {
         try {
@@ -1521,7 +1544,7 @@ public class B2Context {
             this.node = nodes.get(0);
           }
         } catch (PersistenceException e) {
-          log(true, e.toString());
+          log(true, "Error in B2Context.initNode:", (Object)e);
         }
       }
     }
@@ -1576,7 +1599,7 @@ public class B2Context {
         props.putAll(loadFileSettings(true, null, aNode));
       }
     } catch (PersistenceException e) {
-      log(true, e.toString());
+      log(true, "Error in B2Context.getFileNodeProps:", (Object)e);
     }
 
     return props;
@@ -1608,14 +1631,14 @@ public class B2Context {
       } catch (FileNotFoundException e) {
         props.clear();
       } catch (IOException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.loadFileSettings:", (Object)e);
         props.clear();
       } finally {
         if (fiStream != null) {
           try {
             fiStream.close();
           } catch (IOException e) {
-            log(true, e.toString());
+            log(true, "Error in B2Context.loadFileSettings:", (Object)e);
             props.clear();
           }
         }
@@ -1659,11 +1682,11 @@ public class B2Context {
     try {
       customData = CustomData.getCustomData(this.module.getId(), null);
     } catch (blackboard.persist.PersistenceException e) {
-      log(true, e.toString());
+      log(true, "Error in B2Context.getCustomData:", (Object)e);
 //// May need to comment out the next 2 lines when compiling against Learn 9.1
 //    } catch (blackboard.data.ValidationException e) {
     } catch (Exception e) {
-      log(true, e.toString());
+      log(true, "Error in B2Context.getCustomData:", (Object)e);
 ////
     }
 
@@ -1671,27 +1694,27 @@ public class B2Context {
 
   }
 
-  private void getURloader() {
+  private void getURLoader() {
 
     if (urLoader == null) {
       try {
         BbPersistenceManager pm = PersistenceServiceFactory.getInstance().getDbPersistenceManager();
         urLoader = (UserRegistryEntryDbLoader)pm.getLoader("UserRegistryEntryDbLoader");
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.getURLoader:", (Object)e);
       }
     }
 
   }
 
-  private void getURpersister() {
+  private void getURPersister() {
 
     if (urPersister == null) {
       try {
         BbPersistenceManager pm = PersistenceServiceFactory.getInstance().getDbPersistenceManager();
         urPersister = (UserRegistryEntryDbPersister)pm.getPersister("UserRegistryEntryDbPersister");
       } catch (PersistenceException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.getURPersister:", (Object)e);
       }
     }
 
@@ -1708,15 +1731,15 @@ public class B2Context {
     String value;
     Properties props = this.userSettings.get(saveAsName.toString());
     if (props == null) {
-      getURloader();
+      getURLoader();
       Registry userRegistry = null;
       if ((urLoader != null) && !this.userId.equals(Id.UNSET_ID)) {
         try {
           userRegistry = urLoader.loadRegistryByUserId(this.userId);
         } catch (KeyNotFoundException e) {
-          log(true, e.toString());
+          log(true, "Error in B2Context.loadUserSettings:", (Object)e);
         } catch (PersistenceException e) {
-          log(true, e.toString());
+          log(true, "Error in B2Context.loadUserSettings:", (Object)e);
         }
       }
       props = new Properties();
@@ -2027,6 +2050,30 @@ public class B2Context {
   }
 
   /**
+   * Gets a list of all configuration settings.
+   * <p>
+   * Anonymous configuration settings are loaded from a file named
+   * <code><em>vvvv</em>-<em>hhhhhh</em>.properties</code> where <em>vvvv</em> and
+   * <em>hhhhhh</em> are the vendor ID and handle for the current Building
+   * Block, respectively.  Files containing global settings are located in the
+   * Building Block <code>config</code> directory.  Non-global settings files are
+   * located in the content directory (for content-item tools) or the course directory
+   * (for course tools).
+   * <p>
+   * Non-anonymous settings are retrieved from the Blackboard user registry.
+   *
+   * @param global      <code>true</code> if the setting applies to all instances of the tool
+   * @param anonymous   <code>true</code> if the setting applies to all users
+   * @param nodeOnly    <code>true</code> if only settings specified at the current node level should be returned
+   * @return            a map containing the settings found
+   */
+  public Map<String, String> getSettings(boolean global, boolean anonymous, boolean nodeOnly) {
+
+    return getSettings(global, anonymous, null, nodeOnly);
+
+  }
+
+  /**
    * Gets a list of all global anonymous configuration settings.
    * <p>
    * The global anonymous configuration settings are loaded from a file named
@@ -2064,8 +2111,39 @@ public class B2Context {
    */
   public Map<String, String> getSettings(boolean global, boolean anonymous, String fileSuffix) {
 
+    return getSettings(global, anonymous, fileSuffix, false);
+
+  }
+
+  /**
+   * Gets a list of all configuration settings.
+   * <p>
+   * Anonymous configuration settings are loaded from a file named
+   * <code><em>vvvv</em>-<em>hhhhhh</em>.properties</code> where <em>vvvv</em> and
+   * <em>hhhhhh</em> are the vendor ID and handle for the current Building
+   * Block, respectively.  Files containing global settings are located in the
+   * Building Block <code>config</code> directory.  Non-global settings files are
+   * located in the content directory (for content-item tools) or the course directory
+   * (for course tools).
+   * <p>
+   * Non-anonymous settings are retrieved from the Blackboard user registry.
+   *
+   * @param global      <code>true</code> if the setting applies to all instances of the tool
+   * @param anonymous   <code>true</code> if the setting applies to all users
+   * @param fileSuffix  suffix of the settings file name
+   * @param nodeOnly    <code>true</code> if only settings specified at the current node level should be returned
+   * @return            a map containing the settings found
+   */
+  public Map<String, String> getSettings(boolean global, boolean anonymous, String fileSuffix, boolean nodeOnly) {
+
+    Node aNode = null;
+    if (this.node == null) {
+      nodeOnly = false;
+    } else if (nodeOnly) {
+      aNode = this.node;
+    }
     Map<String, String> mapSettings = new HashMap<String, String>();
-    Properties props = this.loadSettings(global, anonymous, fileSuffix);
+    Properties props = this.loadSettings(global, anonymous, fileSuffix, aNode, nodeOnly);
     for (Iterator<Object> iter = props.keySet().iterator(); iter.hasNext();) {
       String name = (String)iter.next();
       mapSettings.put(name, props.getProperty(name));
@@ -2316,7 +2394,7 @@ public class B2Context {
         PortalUtil.savePortalExtraInfo(portalExtraInfo);
       }
     } catch (blackboard.persist.PersistenceException e) {
-      log(true, e.toString());
+      log(true, "Error in B2Context.saveCustomSettings:", (Object)e);
     }
 
   }
@@ -2332,7 +2410,9 @@ public class B2Context {
     File configFile = getConfigFile(global, suffix, aNode);
 // Delete file if no settings
     if ((configFile != null) && props.isEmpty()) {
-      if (configFile.delete()) {
+      if (!configFile.exists()) {
+        configFile = null;
+      } else if (configFile.delete()) {
         configFile = null;
       }
     }
@@ -2349,15 +2429,15 @@ public class B2Context {
         foStream = new FileOutputStream(configFile);
         props.store(foStream, description.toString());
       } catch (FileNotFoundException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.saveFileSettings:", (Object)e);
       } catch (IOException e) {
-        log(true, e.toString());
+        log(true, "Error in B2Context.saveFileSettings:", (Object)e);
       } finally {
         if (foStream != null) {
           try {
             foStream.close();
           } catch (IOException e) {
-            log(true, e.toString());
+            log(true, "Error in B2Context.saveFileSettings:", (Object)e);
           }
         }
       }
@@ -2366,7 +2446,7 @@ public class B2Context {
 
   private void saveUserSettings(boolean global, String suffix, Properties props) {
 
-    this.getURpersister();
+    this.getURPersister();
 
     if ((urPersister != null) && !this.userId.equals(Id.UNSET_ID)) {
       loadUserSettings(global, suffix);
@@ -2397,9 +2477,9 @@ public class B2Context {
               urPersister.persist(entry);
             }
           } catch (ValidationException e) {
-            log(true, e.toString());
+            log(true, "Error in B2Context.saveUserSettings:", (Object)e);
           } catch (PersistenceException e) {
-            log(true, e.toString());
+            log(true, "Error in B2Context.saveUserSettings:", (Object)e);
           }
         }
         currentSettings.remove(name);
@@ -2410,9 +2490,9 @@ public class B2Context {
           try {
             urPersister.deleteByKeyAndUserId(prefix + name, this.userId);
           } catch (KeyNotFoundException e) {
-            log(true, e.toString());
+            log(true, "Error in B2Context.saveUserSettings:", (Object)e);
           } catch (PersistenceException e) {
-            log(true, e.toString());
+            log(true, "Error in B2Context.saveUserSettings:", (Object)e);
           }
         }
       }
@@ -2441,18 +2521,18 @@ public class B2Context {
           CourseContentFileManager ccfm = new CourseContentFileManager();
           configFile = ccfm.getRootDirectory(this.course, this.contentId);
         } catch (FileSystemException e) {
-          log(true, e.toString());
+          log(true, "Error creating properties file for course content", (Object)e);
           configFile = null;
         }
-      } else if (!this.groupId.equals(Id.UNSET_ID) && !this.ignoreGroupContext) {
+      } else if (this.hasGroupContext() && !this.ignoreGroupContext) {
 // For a group item
         try {
           getCourse();
           CourseFileManager cfm = new CourseFileManager();
           configFile = cfm.getRootDirectory(this.course);
-          configFile = new File(configFile, "/ppg");
+          configFile = new File(configFile, File.separator + "ppg");
         } catch (FileSystemException e) {
-          log(true, e.toString());
+          log(true, "Error creating properties file for course group", (Object)e);
           configFile = null;
         }
       } else if (!this.courseId.equals(Id.UNSET_ID) && !this.ignoreCourseContext) {
@@ -2461,9 +2541,9 @@ public class B2Context {
           getCourse();
           CourseFileManager cfm = new CourseFileManager();
           configFile = cfm.getRootDirectory(this.course);
-          configFile = new File(configFile, "/ppg");
+          configFile = new File(configFile, File.separator + "ppg");
         } catch (FileSystemException e) {
-          log(true, e.toString());
+          log(true, "Error creating properties file for course", (Object)e);
           configFile = null;
         }
       }
@@ -2472,7 +2552,7 @@ public class B2Context {
     if (configFile != null) {
       if (!configFile.exists()) {
         if (!configFile.mkdirs()) {
-          log(true, "Unable to create setting directory");
+          log(true, "Unable to create directory for settings properties file");
           configFile = null;
         }
       }
@@ -2486,15 +2566,41 @@ public class B2Context {
       }
       if (global && (aNode != null)) {
         filename.append(aNode.getNodeId().toExternalString());
-      } else if (!global && !this.groupId.equals(Id.UNSET_ID) && !this.ignoreGroupContext) {
+      } else if (!global && this.hasGroupContext() && !this.ignoreGroupContext) {
         filename.append(this.groupId.toExternalString());
       }
       filename = filename.append(SETTINGS_FILE_EXTENSION);
       configFile = new File(configFile, filename.toString());
+      if (!configFile.exists() && !global && this.hasGroupContext() && !this.ignoreGroupContext) {
+        configFile = checkOldGroupLocation(configFile, suffix);
+      }
     }
 
     return configFile;
 
+  }
+
+  private File checkOldGroupLocation(File configFile, String suffix) {
+
+    try {
+      getCourse();
+      CourseContentFileManager ccfm = new CourseContentFileManager();
+      File oldFile = ccfm.getRootDirectory(this.course, this.groupId);
+      StringBuilder filename = new StringBuilder();
+      filename = filename.append(this.vendorId).append("-").append(this.handle);
+      if ((suffix != null) && (suffix.length() > 0)) {
+        filename = filename.append("-").append(suffix);
+      }
+      filename = filename.append(SETTINGS_FILE_EXTENSION);
+      oldFile = new File(oldFile, filename.toString());
+      if (oldFile.exists() && oldFile.renameTo(configFile)) {
+        configFile = oldFile;
+        log(false, "Group file moved to " + configFile.getPath());
+      }
+    } catch (FileSystemException e) {
+    }
+
+    return configFile;
   }
 
   private String getUserSettingsPrefix(boolean global, String suffix) {
@@ -2502,13 +2608,13 @@ public class B2Context {
     StringBuilder name = new StringBuilder();
     name = name.append(this.vendorId).append("-").append(this.handle);
     if (!global) {
-      if (!this.contentId.equals(Id.UNSET_ID) && !this.ignoreContentContext) {
+      if (this.hasContentContext() && !this.ignoreContentContext) {
         name = name.append("-").append(this.courseId.toExternalString());
         name = name.append("-").append(this.contentId.toExternalString());
-      } else if (!this.groupId.equals(Id.UNSET_ID) && !this.ignoreGroupContext) {
+      } else if (this.hasGroupContext() && !this.ignoreGroupContext) {
         name = name.append("-").append(this.courseId.toExternalString());
         name = name.append("-G").append(this.groupId.toExternalString());
-      } else if (!this.courseId.equals(Id.UNSET_ID) && !this.ignoreCourseContext) {
+      } else if (this.hasCourseContext() && !this.ignoreCourseContext) {
         name = name.append("-").append(this.courseId.toExternalString());
       }
     }
@@ -2534,7 +2640,7 @@ public class B2Context {
       NavigationItemDbLoader niLoader = NavigationItemDbLoader.Default.getInstance();
       navItem = niLoader.loadByInternalHandle(name);
     } catch (PersistenceException e) {
-      log(true, e.toString());
+      log(true, "Error in B2Context.getNavigationItem:", (Object)e);
       navItem = null;
     }
 
@@ -2686,7 +2792,7 @@ public class B2Context {
   /**
    * Gets the current status of edit mode (Learn 9.1+).
    *
-   * @return            false if edit mode is off or Learn 9.0, otherwise true
+   * @return            <code>false</code> if edit mode is off or Learn 9.0, otherwise <code>true</code>
    */
   public static boolean getEditMode() {
 
@@ -2696,6 +2802,132 @@ public class B2Context {
     }
 
     return editMode;
+
+  }
+
+  /**
+   * Processes changes arising from a course copy.
+   *
+   * This method should be called from within the blackboard.platform.cx.component.CxComponent.doCopy method.
+   *
+   * @param  copyControl   the CopyControl object for the course copy in progress
+   */
+  public static void processCourseCopy(CopyControl copyControl) {
+
+    B2Context b2Context = new B2Context();
+    String filename = b2Context.vendorId + "-" + b2Context.handle;
+    try {
+      CourseDbLoader courseLoader = CourseDbLoader.Default.getInstance();
+      Course destinationCourse = courseLoader.loadById(copyControl.getDestinationCourseId());
+      CourseFileManager cfm = new CourseFileManager();
+      File configFile = cfm.getRootDirectory(destinationCourse);
+      configFile = new File(configFile, File.separator + "ppg");
+      BbPersistenceManager bbPm = PersistenceServiceFactory.getInstance().getDbPersistenceManager();
+      GroupDbLoader groupDbLoader = (GroupDbLoader)bbPm.getLoader(GroupDbLoader.TYPE);
+      List<Group> groups = groupDbLoader.loadByCourseId(copyControl.getSourceCourseId());
+      Group group;
+      Id destId;
+      File sourceGroupFile;
+      File destinationGroupFile;
+      int n = 0;
+      for (Iterator<Group> iter = groups.iterator(); iter.hasNext();) {
+        group = iter.next();
+        destId = copyControl.lookupIdMapping(group.getId());
+        sourceGroupFile = new File(configFile, filename + group.getId().toExternalString() + SETTINGS_FILE_EXTENSION);
+        if (sourceGroupFile.exists()) {
+          destinationGroupFile = new File(configFile, filename + destId.toExternalString() + SETTINGS_FILE_EXTENSION);
+          if (sourceGroupFile.renameTo(destinationGroupFile)) {
+            n++;
+          } else {
+            copyControl.getLogger().logError("Unable to rename properties file for group " + group.getId().toExternalString());
+          }
+        }
+      }
+      if (n > 0) {
+        copyControl.getLogger().logInfo(String.format("%d group settings file(s) renamed", n));
+      }
+    } catch (FileSystemException e) {
+      copyControl.getLogger().logError(e.getMessage());
+    } catch (PersistenceException e) {
+      copyControl.getLogger().logError(e.getMessage());
+    }
+
+  }
+
+  /**
+   * Processes changes arising from a course export/archive.
+   *
+   * This method should be called from within the blackboard.platform.cx.component.CxComponent.doExport method.
+   *
+   * @param  exportControl   the ExportControl object for the course export/archive in progress
+   * @return                 a Map of any settings to be added
+   */
+  public static Map<String, String> processCourseExport(ExportControl exportControl) {
+
+    Map<String, String> settings = new HashMap<String, String>();
+    try {
+      BbPersistenceManager bbPm = PersistenceServiceFactory.getInstance().getDbPersistenceManager();
+      GroupDbLoader groupDbLoader = (GroupDbLoader)bbPm.getLoader(GroupDbLoader.TYPE);
+      List<Group> groups = groupDbLoader.loadByCourseId(exportControl.getSourceCourseId());
+      Group group;
+      StringBuilder sb = new StringBuilder();
+      for (Iterator<Group> iter = groups.iterator(); iter.hasNext();) {
+        group = iter.next();
+        sb.append(",").append(group.getId().toExternalString());
+      }
+      settings.put(className + "." + GROUPS_SETTING, sb.substring(1));
+    } catch (PersistenceException e) {
+      exportControl.getLogger().logError(e.getMessage());
+    }
+    return settings;
+
+  }
+
+  /**
+   * Processes changes arising from a course export/archive.
+   *
+   * This method should be called from within the blackboard.platform.cx.component.CxComponent.doExport method.
+   *
+   * @param  importControl   the ImportControl object for the course import in progress
+   * @param  props           the properties saved during the export of the file being imported
+   */
+  public static void processCourseImport(ImportControl importControl, Properties props) {
+
+    B2Context b2Context = new B2Context();
+    String filename = b2Context.vendorId + "-" + b2Context.handle;
+    try {
+      CourseDbLoader courseLoader = CourseDbLoader.Default.getInstance();
+      Course destinationCourse = courseLoader.loadById(importControl.getDestinationCourseId());
+      CourseFileManager cfm = new CourseFileManager();
+      File configFile = cfm.getRootDirectory(destinationCourse);
+      configFile = new File(configFile, File.separator + "ppg");
+      String[] groups = props.getProperty(className + "." + GROUPS_SETTING, "").split(",");
+      String groupId;
+      Id destId;
+      File sourceGroupFile;
+      File destinationGroupFile;
+      int n = 0;
+      for (int i = 0; i < groups.length; i++) {
+        groupId = groups[i];
+        destId = importControl.lookupIdMapping(importControl.generateId(Group.DATA_TYPE, groupId));
+        sourceGroupFile = new File(configFile, filename + groupId + SETTINGS_FILE_EXTENSION);
+        if (sourceGroupFile.exists()) {
+          destinationGroupFile = new File(configFile, filename + destId.toExternalString() + SETTINGS_FILE_EXTENSION);
+          if (sourceGroupFile.renameTo(destinationGroupFile)) {
+            n++;
+          } else {
+            importControl.getLogger().logError("Unable to rename properties file for group " + groupId);
+          }
+        }
+      }
+      if (n > 0) {
+        importControl.getLogger().logInfo(String.format("%d group settings file(s) renamed", n));
+      }
+    } catch (FileSystemException e) {
+      importControl.getLogger().logError(e.getMessage());
+    } catch (PersistenceException e) {
+      importControl.getLogger().logError(e.getMessage());
+    }
 
   }
 
@@ -2813,6 +3045,35 @@ public class B2Context {
   }
 
   /**
+   * Sends an error message to the <code>logs/bb-services-log.txt</code> file.
+   *
+   * @param  message  error to be logged
+   */
+  public static void log(String message) {
+
+    log(true, message);
+
+  }
+
+  /**
+   * Sends an object to the <code>logs/bb-services-log.txt</code> file.
+   *
+   * @param  isError  <code>true</code> if the message being logged is an error; <code>false</code> if it is just for information
+   * @param  prefix  prefix to log before object
+   * @param  obj     object to be logged
+   */
+  public static void log(boolean isError, String prefix, Object obj) {
+
+    if (prefix == null) {
+      prefix = "";
+    } else if (prefix.length() > 0) {
+      prefix = prefix + "\n";
+    }
+    log(isError, prefix + String.valueOf(obj));
+
+  }
+
+  /**
    * Sends a log message to the <code>logs/bb-services-log.txt</code> file.
    *
    * @param  isError  <code>true</code> if the message being logged is an error; <code>false</code> if it is just for information
@@ -2820,11 +3081,16 @@ public class B2Context {
    */
   public static void log(boolean isError, String message) {
 
-    if ((isError || logDebug) && getLog()) {
+    if ((isError || logDebug)) {
       if (isError) {
-        log.logError("[ERROR]: " + message);
+        message = "[ERROR]: " + message;
       } else {
-        log.logError("[INFO]:  " + message);
+        message = "[INFO]:  " + message;
+      }
+      if (getLog()) {
+        log.logError(message);
+      } else {
+        System.err.println(logPrefix + message);
       }
     }
 
@@ -2837,6 +3103,7 @@ public class B2Context {
     if (log == null) {
       LogService logService = LogServiceFactory.getInstance();
       B2Context b2Context = new B2Context();
+      logPrefix = "[" + b2Context.getVendorId() + "-" + b2Context.getHandle() + "] - ";
       File logDirectory = PlugInUtil.getLogDirectory(b2Context.getVendorId(), b2Context.getHandle());
       try {
         logService.defineNewFileLog(B2Context.class.getName(), logDirectory.getPath() + File.separator + b2Context.getVendorId() + "-" + b2Context.getHandle() + ".log",

@@ -2875,7 +2875,11 @@ public class B2Context {
         group = iter.next();
         sb.append(",").append(group.getId().toExternalString());
       }
-      settings.put(className + "." + GROUPS_SETTING, sb.substring(1));
+      String groupsSetting = "";
+      if (sb.length() > 0) {
+        groupsSetting = sb.substring(1);
+      }
+      settings.put(className + "." + GROUPS_SETTING, groupsSetting);
     } catch (PersistenceException e) {
       exportControl.getLogger().logError(e.getMessage());
     }

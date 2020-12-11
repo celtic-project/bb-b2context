@@ -1,6 +1,6 @@
 /*
     B2Context - Class providing basic support functions for Building Blocks
-    Copyright (C) 2018  Stephen P Vickers
+    Copyright (C) 2020  Stephen P Vickers
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU Lesser General Public License as published by
@@ -52,6 +52,8 @@
                          Fixed bug when deleting empty properties files
                          Fixed bug with getSchema() when B2 running from cache directory
                          Added code to migrate old group settings files
+      1.9.01  11-Dec-20  Add check for no groups in processCourseExport
+                         Ensure all version numbers have 4 elements
  */
 package com.spvsoftwareproducts.blackboard.utils;
 

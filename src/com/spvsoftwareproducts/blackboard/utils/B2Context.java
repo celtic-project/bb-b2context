@@ -2958,10 +2958,10 @@ public class B2Context {
 
     int[] iVersion = new int[4];
 
-    String version = getVersionNumber("0.0.00000");
+    String version = getVersionNumber("0.0.00000.0");
     String[] sVersion = version.split("\\.");
     if (sVersion.length < 3) {
-      sVersion = "0.0.00000".split("\\.");
+      sVersion = "0.0.00000.0".split("\\.");
     }
 
     iVersion[0] = stringToInt(sVersion[0], 0);

@@ -1,6 +1,6 @@
 /*
     B2Context - Class providing basic support functions for Building Blocks
-    Copyright (C) 2020  Stephen P Vickers
+    Copyright (C) 2022  Stephen P Vickers
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU Lesser General Public License as published by
@@ -54,6 +54,7 @@
                          Added code to migrate old group settings files
       1.9.01  11-Dec-20  Add check for no groups in processCourseExport
                          Ensure all version numbers have 4 elements
+      1.9.02  18-Jun-22  Add check for no groups in processCourseImport
  */
 package com.spvsoftwareproducts.blackboard.utils;
 
@@ -2914,20 +2915,26 @@ public class B2Context {
       File destinationGroupFile;
       int n = 0;
       for (int i = 0; i < groups.length; i++) {
-        groupId = groups[i];
-        destId = importControl.lookupIdMapping(importControl.generateId(Group.DATA_TYPE, groupId));
-        sourceGroupFile = new File(configFile, filename + groupId + SETTINGS_FILE_EXTENSION);
-        if (sourceGroupFile.exists()) {
-          destinationGroupFile = new File(configFile, filename + destId.toExternalString() + SETTINGS_FILE_EXTENSION);
-          if (sourceGroupFile.renameTo(destinationGroupFile)) {
-            n++;
-          } else {
-            importControl.getLogger().logError("Unable to rename properties file for group " + groupId);
+        groupId = groups[i].trim();
+        if (groupId.length() > 0) {
+          destId = importControl.lookupIdMapping(importControl.generateId(Group.DATA_TYPE, groupId));
+          sourceGroupFile = new File(configFile, filename + groupId + SETTINGS_FILE_EXTENSION);
+          if (sourceGroupFile.exists()) {
+            if ((destId != null) && destId.isSet()) {
+              destinationGroupFile = new File(configFile, filename + destId.toExternalString() + SETTINGS_FILE_EXTENSION);
+              if (sourceGroupFile.renameTo(destinationGroupFile)) {
+                n++;
+              } else {
+                importControl.getLogger().logError("Unable to rename properties file for group " + groupId);
+              }
+            } else {
+              importControl.getLogger().logError("Unable to find mapping for group " + groupId);
+            }
           }
         }
-      }
-      if (n > 0) {
-        importControl.getLogger().logInfo(String.format("%d group settings file(s) renamed", n));
+        if (n > 0) {
+          importControl.getLogger().logInfo(String.format("%d group settings file(s) renamed", n));
+        }
       }
     } catch (FileSystemException e) {
       importControl.getLogger().logError(e.getMessage());
